@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 import click
+import importlib.util
 import logging
 import os
 import json
 import pathlib
 import subprocess
+import sys
+from configparser import ConfigParser
 
 import regress_stack.modules
 from regress_stack.core import apt as core_apt
@@ -17,6 +20,126 @@ from regress_stack.modules import utils as module_utils
 from regress_stack.cli.utils import collect_logs
 
 LOG = logging.getLogger(__name__)
+
+
+TEMPESTCONF_USERS = ("demo_tempestconf", "alt_demo_tempestconf")
+DISCOVER_TEMPEST_OVERRIDES = (
+    "volume.catalog_type",
+    "volumev3",
+)
+
+
+def _tool_cmd(name: str, module: str | None = None) -> tuple[str, list[str]]:
+    """Prefer executables from the active interpreter environment."""
+    tool_path = pathlib.Path(sys.executable).with_name(name)
+    if tool_path.exists():
+        return str(tool_path), []
+    if module is not None:
+        return sys.executable, ["-m", module]
+    return name, []
+
+
+def _pip_install_cmd() -> tuple[str, list[str]]:
+    """Return a working pip invocation for installing a compatibility wheel."""
+    if importlib.util.find_spec("pip") is not None:
+        return sys.executable, [
+            "-m",
+            "pip",
+            "install",
+            "python-tempestconf",
+            "--break-system-packages",
+        ]
+
+    try:
+        utils.run(sys.executable, ["-m", "ensurepip", "--upgrade"])
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        LOG.info("Could not bootstrap pip with ensurepip for %s", sys.executable)
+    else:
+        if importlib.util.find_spec("pip") is not None:
+            return sys.executable, [
+                "-m",
+                "pip",
+                "install",
+                "python-tempestconf",
+                "--break-system-packages",
+            ]
+
+    return "/usr/bin/python3", [
+        "-m",
+        "pip",
+        "install",
+        "python-tempestconf",
+        "--break-system-packages",
+    ]
+
+
+def _ensure_tempestconf_compat():
+    """Install python-tempestconf from PyPI if it triggers an argparse conflict.
+
+    The Ubuntu package of config_tempest calls openstack.connect(argparse=...).
+    Newer openstacksdk removed 'argparse' from get_cloud_region()'s explicit
+    parameters, so it lands in **kwargs. When get_cloud_region() then calls
+    get_one(argparse=parsed_options, **kwargs), Python raises
+    "multiple values for keyword argument 'argparse'".
+
+    The fix is a newer python-tempestconf that no longer passes argparse= to
+    openstack.connect().
+    """
+    import inspect
+    import openstack.config as osc_config
+
+    if "argparse" not in inspect.signature(osc_config.get_cloud_region).parameters:
+        utils.warn_workaround(
+            "python-tempestconf argparse conflict",
+            "installing python-tempestconf from PyPI to fix openstack.connect argparse conflict",
+        )
+        cmd, args = _pip_install_cmd()
+        utils.run(cmd, args)
+
+
+def _cleanup_tempestconf_users() -> None:
+    """Remove stale TempestConf users left by a partial previous run."""
+    conn = keystone.o7k()
+    domain_id = keystone.default_domain()
+    for username in TEMPESTCONF_USERS:
+        users = list(conn.identity.users(name=username, domain_id=domain_id))
+        for user in users:
+            utils.warn_workaround(
+                "stale TempestConf identity resources",
+                f"deleting leftover user {username} before regenerating tempest config",
+            )
+            conn.identity.delete_user(user, ignore_missing=True)
+
+
+def _sync_tempest_workspace(workspace_dir: pathlib.Path) -> None:
+    """Keep an existing Tempest workspace aligned with the active venv."""
+    import tempest.cmd.init as tempest_init
+
+    stestr_conf = workspace_dir / ".stestr.conf"
+    top_dir = pathlib.Path(tempest_init.__file__).resolve().parent.parent
+    expected = {
+        "test_path": str(top_dir / "test_discover"),
+        "top_dir": str(top_dir),
+        "group_regex": r"([^\.]*\.)*",
+    }
+
+    if not stestr_conf.exists():
+        parser = ConfigParser()
+        parser["DEFAULT"] = expected
+        with stestr_conf.open("w") as fh:
+            parser.write(fh)
+        return
+
+    parser = ConfigParser()
+    parser.read(stestr_conf)
+    current = parser["DEFAULT"]
+    if all(current.get(key) == value for key, value in expected.items()):
+        return
+
+    LOG.info("Repairing Tempest workspace config in %s", stestr_conf)
+    parser["DEFAULT"] = expected
+    with stestr_conf.open("w") as fh:
+        parser.write(fh)
 
 
 @click.command()
@@ -43,29 +166,40 @@ def test(concurrency, retry_failed):
     if core_apt.PkgVersionCompare("python3-tempestconf") < "3.5.1-1ubuntu1~cloud0":
         core_apt.add_ppa("ppa:freyes/lp2141604")
         utils.run("apt", ["install", "-yq", "--only-upgrade", "python3-tempestconf"])
+    _ensure_tempestconf_compat()
+    _cleanup_tempestconf_users()
     env = os.environ.copy()
     env.update(keystone.auth_env())
     dir_name = "mycloud01"
-    release = utils.release()
+    tempest_cmd, tempest_prefix = _tool_cmd("tempest")
+    discover_cmd, discover_prefix = _tool_cmd(
+        "discover-tempest-config", "config_tempest.main"
+    )
+    stestr_cmd, stestr_prefix = _tool_cmd("stestr")
     workspaces = json.loads(
-        utils.run("tempest", ["workspace", "list", "--format", "json"])
+        utils.run(tempest_cmd, [*tempest_prefix, "workspace", "list", "--format", "json"])
     )
     workspaces = [ws["Name"] for ws in workspaces]
     if dir_name in workspaces:
         LOG.info("Tempest workspace %s already exists, skipping init", dir_name)
     else:
-        utils.run("tempest", ["init", dir_name])
+        utils.run(tempest_cmd, [*tempest_prefix, "init", dir_name])
+    _sync_tempest_workspace(pathlib.Path(dir_name))
 
+    image_url = utils.ubuntu_cloud_image_url()
+    LOG.info("Using Tempest image %s", image_url)
     utils.run(
-        "discover-tempest-config",
+        discover_cmd,
         [
+            *discover_prefix,
             "--create",
             "--flavor-min-mem",
             "1024",
             "--flavor-min-disk",
             "5",
             "--image",
-            f"http://cloud-images.ubuntu.com/{release}/current/{release}-server-cloudimg-{utils.machine()}.img",
+            image_url,
+            *DISCOVER_TEMPEST_OVERRIDES,
         ],
         env=env,
         cwd=dir_name,
@@ -107,8 +241,9 @@ def test(concurrency, retry_failed):
             global_exclude_regex.append("|".join(exclude_regexes))
 
     regress_tests = utils.run(
-        "tempest",
+        tempest_cmd,
         [
+            *tempest_prefix,
             "run",
             "--list",
             "--regex",
@@ -123,16 +258,20 @@ def test(concurrency, retry_failed):
     regress_list = pathlib.Path(dir_name) / "regress_tests.txt"
     regress_list.write_text(regress_tests)
 
-    # The tempest run is a long-running process and to improve UX we want
-    # direct output of both STDOUT and STDERR.
-    #
-    # Implementing that with subprocess is complicated, and as we do not need
-    # to process the output we can use system().
     load_list = str(regress_list.relative_to(dir_name))
-    utils.system(
-        f"tempest run --load-list {load_list} --concurrency {concurrency}",
-        env,
-        dir_name,
+    subprocess.run(
+        [
+            tempest_cmd,
+            *tempest_prefix,
+            "run",
+            "--load-list",
+            load_list,
+            "--concurrency",
+            str(concurrency),
+        ],
+        check=True,
+        env=env,
+        cwd=dir_name,
     )
 
     retries = 0
@@ -140,7 +279,7 @@ def test(concurrency, retry_failed):
     while retry_failed >= retries and not successful_run:
         try:
             with utils.banner("Fetching failing tests"):
-                utils.run("stestr", ["failing", "--list"], cwd=dir_name)
+                utils.run(stestr_cmd, [*stestr_prefix, "failing", "--list"], cwd=dir_name)
                 successful_run = True
         except subprocess.CalledProcessError:
             retries += 1

@@ -68,7 +68,8 @@ def setup():
             "connection",
             mysql.connection_string("keystone", username, password),
         ),
-        ("database", "max_pool_size", "1"),
+        ("database", "max_pool_size", "20"),
+        ("database", "max_overflow", "100"),
         ("token", "provider", "fernet"),
     )
     LOG.debug("Running keystone-manage db_sync...")

@@ -15,6 +15,8 @@ import socket
 import subprocess
 import time
 import typing
+import urllib.error
+import urllib.request
 
 import pyroute2
 
@@ -219,6 +221,50 @@ def release() -> str:
     except Exception:
         LOG.exception("Failed to get release name")
         return "noble"
+
+
+def ubuntu_cloud_image_url(
+    release_name: typing.Optional[str] = None,
+    arch: typing.Optional[str] = None,
+) -> str:
+    """Return a reachable Ubuntu cloud image URL.
+
+    The newest series may not have published cloud images yet. In that case,
+    fall back to a known-good release so Tempest can still provision guests.
+    """
+    if image_url := os.environ.get("REGRESS_STACK_IMAGE_URL"):
+        LOG.info("Using image URL override from REGRESS_STACK_IMAGE_URL: %s", image_url)
+        return image_url
+
+    release_name = release_name or release()
+    arch = arch or machine()
+
+    candidates = [release_name, "noble", "jammy", "focal"]
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        image_url = (
+            f"https://cloud-images.ubuntu.com/{candidate}/current/"
+            f"{candidate}-server-cloudimg-{arch}.img"
+        )
+        try:
+            with urllib.request.urlopen(image_url, timeout=10) as response:
+                if response.status == 200:
+                    if candidate != release_name:
+                        warn_workaround(
+                            "missing Ubuntu cloud image",
+                            f"using {candidate} cloud image because {release_name} is not yet available",
+                        )
+                    return image_url
+        except urllib.error.URLError:
+            LOG.info("Ubuntu cloud image not reachable: %s", image_url)
+
+    raise RuntimeError(
+        "Could not find a reachable Ubuntu cloud image. "
+        "Set REGRESS_STACK_IMAGE_URL to override the image used for Tempest."
+    )
 
 
 def mark_setup(name: str):

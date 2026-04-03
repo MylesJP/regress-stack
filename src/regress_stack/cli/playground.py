@@ -4,6 +4,7 @@
 import click
 import logging
 import pathlib
+import urllib.parse
 
 from regress_stack.core import utils
 from regress_stack.modules import keystone
@@ -31,11 +32,10 @@ def playground():
 
     release = utils.release()
     arch = utils.machine()
-
-    # Image URL based on release and architecture
-    image_url = f"http://cloud-images.ubuntu.com/{release}/current/{release}-server-cloudimg-{arch}.img"
-    image_name = f"ubuntu-{release}"
-    image_file = f"{release}-server-cloudimg-{arch}.img"
+    image_url = utils.ubuntu_cloud_image_url(release, arch)
+    image_file = pathlib.PurePosixPath(urllib.parse.urlparse(image_url).path).name
+    image_release = image_file.split("-server-cloudimg-", 1)[0]
+    image_name = f"ubuntu-{image_release}"
 
     with utils.banner("Setting up playground environment"):
         LOG.info("Release: %s, Architecture: %s", release, arch)
