@@ -39,7 +39,12 @@ def determine_packages(no_tempest: bool = False) -> list[str]:
         core_apt.PkgVersionCompare("python3-neutron", candidate=True, upstream=True)
         >= NEUTRON_SPLIT_SERVICES_VERSION
     ):
-        packages += ["neutron-rpc-server", "neutron-api", "neutron-periodic-workers"]
+        packages += [
+            "neutron-rpc-server",
+            "neutron-api",
+            "neutron-periodic-workers",
+            "neutron-ovn-maintenance-worker",
+        ]
     else:
         packages += ["neutron-server"]
 
@@ -150,6 +155,7 @@ def setup():
             "apache2",  # neutron-api runs under apache2 as a WSGI application
             "neutron-rpc-server",
             "neutron-periodic-workers",
+            "neutron-ovn-maintenance-worker",
         ]
     else:
         neutron_daemons = [

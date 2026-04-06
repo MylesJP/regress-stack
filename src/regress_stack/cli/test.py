@@ -142,6 +142,26 @@ def _sync_tempest_workspace(workspace_dir: pathlib.Path) -> None:
         parser.write(fh)
 
 
+def _configure_tempest_validation(tempest_conf: pathlib.Path) -> None:
+    """Prefer keypair-based SSH validation for Ubuntu cloud images."""
+    parser = ConfigParser()
+    parser.read(tempest_conf)
+    if not parser.has_section("validation"):
+        parser.add_section("validation")
+
+    validation = parser["validation"]
+    validation["image_ssh_user"] = "ubuntu"
+    validation["image_alt_ssh_user"] = "ubuntu"
+    validation["auth_method"] = "keypair"
+    # Tempest defaults these options to "password" when unset, and some
+    # compute tests pass the value through even when a keypair is available.
+    validation["image_ssh_password"] = ""
+    validation["image_alt_ssh_password"] = ""
+
+    with tempest_conf.open("w") as fh:
+        parser.write(fh)
+
+
 @click.command()
 @click.option(
     "--concurrency",
@@ -210,6 +230,7 @@ def test(concurrency, retry_failed):
         ("validation", "image_ssh_user", "ubuntu"),
         ("validation", "image_alt_ssh_user", "ubuntu"),
     )
+    _configure_tempest_validation(tempest_conf)
 
     test_regexes = []
     for mod in get_execution_order(regress_stack.modules):
@@ -255,17 +276,16 @@ def test(concurrency, retry_failed):
         cwd=dir_name,
     )
 
+    regress_tests_list = [line for line in regress_tests.splitlines() if line.strip()]
     regress_list = pathlib.Path(dir_name) / "regress_tests.txt"
-    regress_list.write_text(regress_tests)
-
-    load_list = str(regress_list.relative_to(dir_name))
+    regress_list.write_text("\n".join(regress_tests_list) + "\n")
     subprocess.run(
         [
             tempest_cmd,
             *tempest_prefix,
             "run",
             "--load-list",
-            load_list,
+            regress_list.name,
             "--concurrency",
             str(concurrency),
         ],
@@ -294,8 +314,16 @@ def test(concurrency, retry_failed):
                     retries,
                     retry_failed,
                 )
-                utils.system(
-                    f"stestr run --failing --concurrency {concurrency}",
-                    env,
-                    dir_name,
+                subprocess.run(
+                    [
+                        stestr_cmd,
+                        *stestr_prefix,
+                        "run",
+                        "--failing",
+                        "--concurrency",
+                        str(concurrency),
+                    ],
+                    check=True,
+                    env=env,
+                    cwd=dir_name,
                 )

@@ -126,12 +126,9 @@ def setup():
         *module_utils.dict_to_cfg_set_args(
             "spice",
             {
-                "enabled": "true",
-                "agent_enabled": "true",
-                "html5proxy_base_url": f"http://{core_utils.my_ip()}:6082/spice_auto.html",
-                "server_listen": core_utils.my_ip(),
-                "server_proxyclient_address": core_utils.my_ip(),
-                "keymap": "en-us",
+                # This environment runs under nested virtualization where the
+                # available QEMU build may not support SPICE graphics.
+                "enabled": "false",
             },
         ),
         *module_utils.dict_to_cfg_set_args(
@@ -226,7 +223,6 @@ def _ensure_questing_compat() -> None:
         )
     if _api_runs_under_apache():
         _ensure_metadata_site()
-
 
 def _using_sudo_rs() -> bool:
     result = subprocess.run(

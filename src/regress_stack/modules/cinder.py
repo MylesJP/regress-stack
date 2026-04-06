@@ -59,6 +59,19 @@ def setup():
         *module_utils.dict_to_cfg_set_args(
             "keystone_authtoken", keystone.authtoken_service(username, password)
         ),
+        *module_utils.dict_to_cfg_set_args(
+            "glance",
+            {
+                "auth_type": "password",
+                "auth_url": keystone.OS_AUTH_URL,
+                "project_domain_name": "service",
+                "user_domain_name": "service",
+                "project_name": "service",
+                "username": username,
+                "password": password,
+                "region_name": module_utils.REGION,
+            },
+        ),
         ("oslo_concurrency", "lock_path", "/var/lib/cinder/tmp"),
         *module_utils.dict_to_cfg_set_args(
             "ceph",
@@ -93,7 +106,6 @@ def _ensure_questing_compat() -> None:
         CONF,
         ("cinder_sys_admin", "helper_command", CINDER_PRIVSEP_HELPER),
     )
-
 
 def _using_sudo_rs() -> bool:
     result = subprocess.run(
